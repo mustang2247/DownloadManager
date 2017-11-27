@@ -57,7 +57,7 @@ registerBroadcast();
 * 在清单文件中注册Service
 ```
 <!--版本更新服务-->
-<service android:name="com.github.phoenix.service.DownloadService"></service>
+<service android:name="com.github.phoenix.service.UpdateService"></service>
 ```
 
 二：监听下载进度

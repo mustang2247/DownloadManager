@@ -1,6 +1,5 @@
 package com.github.phoenix.service;
 
-import android.app.Activity;
 import android.app.DownloadManager;
 import android.app.Service;
 import android.content.BroadcastReceiver;
@@ -11,12 +10,16 @@ import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
+import android.util.Log;
 
-import com.github.phoenix.utils.APPUtil;
+import com.github.phoenix.cb.OnProgressListener;
 import com.github.phoenix.utils.Constant;
+import com.github.phoenix.utils.Constants;
 import com.github.phoenix.utils.LogUtil;
 import com.github.phoenix.utils.SPUtil;
 
@@ -26,29 +29,49 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 用DownloadManager来实现版本更新
- *
- * @author Phoenix
- * @date 2016-8-24 14:06
  */
-public class DownloadService extends Service {
-    private static final String TAG = DownloadService.class.getSimpleName();
+public class UpdateService extends Service {
+    private static final String TAG = UpdateService.class.getSimpleName();
 
     public static final int HANDLE_DOWNLOAD = 0x001;
     public static final String BUNDLE_KEY_DOWNLOAD_URL = "download_url";
+    public static final String DOWNLOAD_APP_NAME = "download_app_name";
     public static final float UNBIND_SERVICE = 2.0F;
 
-    private Activity activity;
+    /**
+     * 绑定器
+     */
     private DownloadBinder binder;
+    /**
+     * 下载管理器
+     */
     private DownloadManager downloadManager;
-    private DownloadChangeObserver downloadObserver;
+    /**
+     * 下载进度观察者
+     */
+    private DownloadChangeObserver downloadChangeObserver;
+    /**
+     * 下载完成监听器
+     */
     private BroadcastReceiver downLoadBroadcast;
+    /**
+     * 任务管理器
+     */
     private ScheduledExecutorService scheduledExecutorService;
 
-    //下载任务ID
+    /**
+     * 下载任务ID
+     */
     private long downloadId;
+    /**
+     * 下载URL
+     */
     private String downloadUrl;
+    private String downloadAppName;
+    /**
+     * 进度回调
+     */
     private OnProgressListener onProgressListener;
-
     public Handler downLoadHandler = new Handler() {
         @Override
         public void handleMessage(Message msg) {
@@ -78,7 +101,8 @@ public class DownloadService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         downloadUrl = intent.getStringExtra(BUNDLE_KEY_DOWNLOAD_URL);
-        LogUtil.i(TAG, "Apk下载路径传递成功：" + downloadUrl);
+        downloadAppName = intent.getStringExtra(DOWNLOAD_APP_NAME);
+        LogUtil.i(Constants.tag, "Apk下载路径传递成功：" + downloadUrl + "  downloadAppName:  " + downloadAppName);
         downloadApk(downloadUrl);
         return binder;
     }
@@ -88,25 +112,27 @@ public class DownloadService extends Service {
      */
     private void downloadApk(String url) {
         downloadManager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        downloadObserver = new DownloadChangeObserver();
-
+        // 注册下载进度监听
+        downloadChangeObserver = new DownloadChangeObserver();
         registerContentObserver();
 
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
         /**设置用于下载时的网络状态*/
         request.setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI | DownloadManager.Request.NETWORK_MOBILE);
         /**设置通知栏是否可见*/
+//        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
         request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_HIDDEN);
         /**设置漫游状态下是否可以下载*/
-        request.setAllowedOverRoaming(false);
+//        request.setAllowedOverRoaming(false);
         /**如果我们希望下载的文件可以被系统的Downloads应用扫描到并管理，
          我们需要调用Request对象的setVisibleInDownloadsUi方法，传递参数true.*/
         request.setVisibleInDownloadsUi(true);
         /**设置文件保存路径*/
-        request.setDestinationInExternalFilesDir(getApplicationContext(), "phoenix", "phoenix.apk");
+        request.setDestinationInExternalFilesDir(getApplicationContext(), Environment.DIRECTORY_DOWNLOADS, downloadAppName + ".apk");
         /**将下载请求放入队列， return下载任务的ID*/
         downloadId = downloadManager.enqueue(request);
 
+        // 注册service 广播 1.任务完成时 2.进行中的任务被点击
         registerBroadcast();
     }
 
@@ -136,8 +162,8 @@ public class DownloadService extends Service {
      */
     private void registerContentObserver() {
         /** observer download change **/
-        if (downloadObserver != null) {
-            getContentResolver().registerContentObserver(Uri.parse("content://downloads/my_downloads"), false, downloadObserver);
+        if (downloadChangeObserver != null) {
+            getContentResolver().registerContentObserver(Uri.parse("content://downloads/my_downloads"), false, downloadChangeObserver);
         }
     }
 
@@ -145,8 +171,8 @@ public class DownloadService extends Service {
      * 注销ContentObserver
      */
     private void unregisterContentObserver() {
-        if (downloadObserver != null) {
-            getContentResolver().unregisterContentObserver(downloadObserver);
+        if (downloadChangeObserver != null) {
+            getContentResolver().unregisterContentObserver(downloadChangeObserver);
         }
     }
 
@@ -160,6 +186,85 @@ public class DownloadService extends Service {
 
         if (downLoadHandler != null) {
             downLoadHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    /**
+     * 接受下载完成广播
+     */
+    private class DownLoadBroadcast extends BroadcastReceiver {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            long downId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+            switch (intent.getAction()) {
+                case DownloadManager.ACTION_DOWNLOAD_COMPLETE:
+                    if (downloadId == downId && downId != -1 && downloadManager != null) {
+                        Uri downIdUri = downloadManager.getUriForDownloadedFile(downloadId);
+
+                        close();
+
+                        if (downIdUri != null) {
+                            LogUtil.i(TAG, "广播监听下载完成，APK存储路径为 ：" + downIdUri.getPath());
+                            SPUtil.put(Constant.SP_DOWNLOAD_PATH, downIdUri.getPath());
+//                            APPUtil.installApk(context, downIdUri);
+                            installAPK(downIdUri);
+                        }
+                        if (onProgressListener != null) {
+                            onProgressListener.onProgress(UNBIND_SERVICE);
+                        }
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+
+    private void installAPK(Uri apk) {
+        Intent intents;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            intents = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+            intents.addCategory("android.intent.category.DEFAULT");
+            intents.setDataAndType(apk, "application/vnd.android.package-archive");
+            intents.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intents);
+        } else {
+            intents = new Intent();
+            intents.setAction("android.intent.action.VIEW");
+            intents.addCategory("android.intent.category.DEFAULT");
+            intents.setType("application/vnd.android.package-archive");
+            intents.setData(apk);
+            intents.setDataAndType(apk, "application/vnd.android.package-archive");
+            intents.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            // 如果不加上这句的话在apk安装完成之后点击单开会崩溃
+            try {
+                startActivity(intents);
+            } catch (Exception e) {
+                Log.e("UpdataService", "installAPK", e);
+            }
+        }
+    }
+
+    /**
+     * 监听下载进度
+     */
+    private class DownloadChangeObserver extends ContentObserver {
+
+        public DownloadChangeObserver() {
+            super(downLoadHandler);
+            scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
+        }
+
+        /**
+         * 当所监听的Uri发生改变时，就会回调此方法
+         *
+         * @param selfChange 此值意义不大, 一般情况下该回调值false
+         */
+        @Override
+        public void onChange(boolean selfChange) {
+            scheduledExecutorService.scheduleAtFixedRate(progressRunnable, 0, 1, TimeUnit.SECONDS);
         }
     }
 
@@ -201,87 +306,16 @@ public class DownloadService extends Service {
         return bytesAndStatus;
     }
 
-    /**
-     * 绑定此DownloadService的Activity实例
-     *
-     * @param activity
-     */
-    public void setTargetActivity(Activity activity) {
-        this.activity = activity;
-    }
-
-    /**
-     * 接受下载完成广播
-     */
-    private class DownLoadBroadcast extends BroadcastReceiver {
-
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            long downId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
-            switch (intent.getAction()) {
-                case DownloadManager.ACTION_DOWNLOAD_COMPLETE:
-                    if (downloadId == downId && downId != -1 && downloadManager != null) {
-                        Uri downIdUri = downloadManager.getUriForDownloadedFile(downloadId);
-
-                        close();
-
-                        if (downIdUri != null) {
-                            LogUtil.i(TAG, "广播监听下载完成，APK存储路径为 ：" + downIdUri.getPath());
-                            SPUtil.put(Constant.SP_DOWNLOAD_PATH, downIdUri.getPath());
-                            APPUtil.installApk(context, downIdUri);
-                        }
-                        if (onProgressListener != null) {
-                            onProgressListener.onProgress(UNBIND_SERVICE);
-                        }
-                    }
-                    break;
-
-                default:
-                    break;
-            }
-        }
-    }
-
-    /**
-     * 监听下载进度
-     */
-    private class DownloadChangeObserver extends ContentObserver {
-
-        public DownloadChangeObserver() {
-            super(downLoadHandler);
-            scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-        }
-
-        /**
-         * 当所监听的Uri发生改变时，就会回调此方法
-         *
-         * @param selfChange 此值意义不大, 一般情况下该回调值false
-         */
-        @Override
-        public void onChange(boolean selfChange) {
-            scheduledExecutorService.scheduleAtFixedRate(progressRunnable, 0, 2, TimeUnit.SECONDS);
-        }
-    }
-
     public class DownloadBinder extends Binder {
         /**
          * 返回当前服务的实例
          *
          * @return
          */
-        public DownloadService getService() {
-            return DownloadService.this;
+        public UpdateService getService() {
+            return UpdateService.this;
         }
 
-    }
-
-    public interface OnProgressListener {
-        /**
-         * 下载进度
-         *
-         * @param fraction 已下载/总大小
-         */
-        void onProgress(float fraction);
     }
 
     /**

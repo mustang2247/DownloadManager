@@ -31,7 +31,15 @@
         </activity>
 
         <!--版本更新服务-->
-        <service android:name="com.github.phoenix.service.DownloadService"></service>
+        <!--<service android:name="com.github.phoenix.service.UpdateService"></service>-->
+
+        <service android:name="com.github.phoenix.service.UpdateService"
+            android:enabled="true">
+            <intent-filter >
+                <action android:name="com.openapi.util.UpdateService"/>
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>
